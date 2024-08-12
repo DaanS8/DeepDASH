@@ -72,6 +72,114 @@ class RegionProposalDD(nn.Module):
     def forward(self, x):
         return self.backbone(x)
 
+
+class RegionProposalResnet(nn.Module):
+    """
+    Proposal Phase of DeepDASH with ResNet backbone.
+    Given fused frames, output a heatmap of predicted swimmers' heads.
+    """
+    def __init__(self, n=5, d=3, pretrained=True, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        self.n = n
+        self.d = d
+        
+        if pretrained:
+            resnet18 = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+        else:
+            resnet18 = models.resnet18(weights=None)
+
+        # Early fusion layer
+        self.block1 = nn.Sequential(
+            nn.Conv2d(n * d, 64, kernel_size=7, stride=2, padding=3, bias=False),
+            resnet18.bn1,
+            resnet18.relu,
+            resnet18.maxpool
+        )
+
+        # Only use first three Resnet layers
+        # to end up with same resolution heatmap
+        self.block2 = resnet18.layer1
+        self.block3 = resnet18.layer2
+        self.block4 = resnet18.layer3
+
+        # Final prediction layer
+        self.block5 = nn.Sequential(
+            nn.Conv2d(256, 1, kernel_size=3, padding=1), 
+            nn.Sigmoid()
+        )
+
+        self.backbone = nn.Sequential(
+            self.block1,
+            self.block2,
+            self.block3,
+            self.block4,
+            self.block5
+        )
+
+    def forward(self, x):
+        return self.backbone(x)
+
+
+
+class RegionProposalFPN(nn.Module):
+    # Based on: https://www.kaggle.com/code/qdpatidar687/fpn-on-resnet18
+
+    def __init__(self, n=5, d=3, pretrained=True):
+        super(RegionProposalFPN, self).__init__()
+
+        self.n = n
+        self.d = d
+        self.num_features_out = 256
+
+        if pretrained:
+            resnet18 = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+        else:
+            resnet18 = models.resnet18(weights=None)
+
+        # Early fusion
+        self.block1 = nn.Sequential(
+            nn.Conv2d(n * d, 64, kernel_size=7, stride=2, padding=3, bias=False),
+            resnet18.bn1,
+            resnet18.relu,
+            resnet18.maxpool
+        )
+        self.block2 = resnet18.layer1 
+        self.block3 = resnet18.layer2 
+        self.block4 = resnet18.layer3 
+        self.block5 = resnet18.layer4
+
+        # Lateral connections
+        self.lateral_c5 = nn.Conv2d(512, self.num_features_out, kernel_size=1)
+        self.lateral_c4 = nn.Conv2d(256, self.num_features_out, kernel_size=1)
+
+        # Smoothing
+        self.smooth_p4 = nn.Conv2d(self.num_features_out, self.num_features_out, kernel_size=3, padding=1)
+
+        # Final prediction layer
+        self.predict = nn.Sequential(
+            nn.Conv2d(self.num_features_out, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        # Bottom to top
+        c1 = self.block1(x)
+        c2 = self.block2(c1)
+        c3 = self.block3(c2)
+        c4 = self.block4(c3)
+        c5 = self.block5(c4)
+
+        # Top to bottom
+        p5 = self.lateral_c5(c5)
+        p4 = self.lateral_c4(c4) + F.interpolate(p5, size=c4.shape[2:], mode='nearest')
+        p4 = self.smooth_p4(p4)
+
+        # Only use original feature map size
+        out = self.predict(p4)
+
+        return out
+
 class RefinementDeepDash(nn.Module):
     """
     Superclass defining the refinement phases possible for DeepDASH.
